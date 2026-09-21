@@ -1,14 +1,14 @@
 import os
 
 from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://app_user:app_password@localhost:5432/secure_data"
 )
 
-engine = create_engine(DATABASE_URL)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 SessionLocal = sessionmaker(
     autocommit=False,
@@ -16,4 +16,14 @@ SessionLocal = sessionmaker(
     bind=engine
 )
 
-Base = declarative_base()
+
+class Base(DeclarativeBase):
+    pass
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
