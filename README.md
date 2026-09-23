@@ -4,6 +4,8 @@
 
 The backend uses Argon2id password hashes, 15-minute JWT access tokens, and seven-day refresh tokens stored server-side and delivered through an HttpOnly cookie. Refresh tokens rotate on every refresh and reuse revokes the user's active refresh sessions. `SameSite=Lax` protects the cookie for the local same-site deployment; set `COOKIE_SECURE=true` behind HTTPS.
 
+Access tokens live only in the React auth context. The frontend never reads or persists the refresh cookie. A small in-process login limiter returns `429` after five failures for the same client/email within 60 seconds; production deployments with multiple API replicas should move this counter to shared infrastructure such as Redis.
+
 Roles are database-backed and limited to `admin`, `manager`, and `employee`. The frontend role selector is presentation-only. FastAPI dependencies load the current user and role from the database, so request bodies, JWT role claims, and browser state cannot elevate permissions.
 
 ## Local setup
@@ -23,6 +25,8 @@ Authentication lives under `/api/v1/auth`: `login`, `refresh`, `logout`, `me`, `
 
 `ADMIN_EMAIL` and `ADMIN_PASSWORD` are used only by the explicit, idempotent `python -m app.seed` command. Password reset tokens are hashed and single-use; an email provider is not wired yet, so reset delivery needs to be connected before production use.
 
+Authentication events such as successful/failed login, refresh, logout, password reset, user creation, role changes, and deactivation are persisted in `auth_audit_events`. Raw passwords and tokens are never stored in these events. Playwright is not configured in this repository yet; browser verification is performed manually against the running Vite and FastAPI services.
+
 ## Verification
 
-Run backend tests with `backend\\venv\\Scripts\\python.exe -m pytest tests` after the database is migrated. Run the frontend build with `npm run build --prefix frontend`. Docker startup is `docker compose up --build`.
+Run backend tests with `backend\\venv\\Scripts\\python.exe -m pytest tests` after the database is migrated. Run frontend tests with `npm test --prefix frontend` and the build with `npm run build --prefix frontend`. Docker startup is `docker compose up --build`. Check migration state with `backend\\venv\\Scripts\\alembic.exe current`.

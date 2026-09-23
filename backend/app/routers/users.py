@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
+from app.audit import record_auth_event
 from app.db.models import Role, User
 from app.deps import require_roles
 from app.schemas import UserCreate, UserResponse, UserUpdate
@@ -30,12 +31,14 @@ def get_role(db: Session, name: str) -> Role:
 
 
 @router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def create_user(payload: UserCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
+def create_user(payload: UserCreate, db: Session = Depends(get_db), admin: User = Depends(require_roles("admin"))):
     email = normalize_email(str(payload.email))
     if db.scalar(select(User).where(User.email == email)):
         raise HTTPException(status_code=409, detail="A user with that email already exists")
     user = User(email=email, password_hash=hash_password(payload.password), role=get_role(db, payload.role), is_active=True)
     db.add(user)
+    db.flush()
+    record_auth_event(db, "USER_CREATED", admin.id)
     db.commit()
     db.refresh(user)
     logger.info("user_created user_id=%s role=%s", user.id, user.role.name)
@@ -69,16 +72,20 @@ def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)
     if "password" in changes:
         user.password_hash = hash_password(changes["password"])
     if "role" in changes:
+        previous_role = user.role.name
         new_role = get_role(db, changes["role"])
         active_admins = db.scalar(select(func.count(User.id)).join(Role).where(Role.name == "admin", User.is_active.is_(True)))
         if user.role.name == "admin" and new_role.name != "admin" and user.is_active and active_admins <= 1:
             raise HTTPException(status_code=400, detail="The last active admin cannot lose admin role")
         user.role = new_role
+        if new_role.name != previous_role:
+            record_auth_event(db, "USER_ROLE_CHANGED", admin.id)
     if "is_active" in changes and not changes["is_active"] and user.is_active:
         active_admins = db.scalar(select(func.count(User.id)).join(Role).where(Role.name == "admin", User.is_active.is_(True)))
         if user.role.name == "admin" and active_admins <= 1:
             raise HTTPException(status_code=400, detail="The last active admin cannot be deactivated")
         user.is_active = False
+        record_auth_event(db, "USER_DEACTIVATED", admin.id)
     elif "is_active" in changes:
         user.is_active = changes["is_active"]
     db.commit()
@@ -88,7 +95,7 @@ def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_user(user_id: int, db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
+def delete_user(user_id: int, db: Session = Depends(get_db), admin: User = Depends(require_roles("admin"))):
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -97,4 +104,5 @@ def delete_user(user_id: int, db: Session = Depends(get_db), _: User = Depends(r
         if active_admins <= 1:
             raise HTTPException(status_code=400, detail="The last active admin cannot be deleted")
     user.is_active = False
+    record_auth_event(db, "USER_DEACTIVATED", admin.id)
     db.commit()

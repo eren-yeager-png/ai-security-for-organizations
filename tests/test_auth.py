@@ -144,3 +144,11 @@ def test_password_reset_token_is_single_use_and_expiry_is_enforced():
         db.scalar(select(User).where(User.email == "test-employee@example.com")).password_hash = hash_password("EmployeePass1")
         db.commit()
         db.close()
+
+
+def test_login_rate_limit_returns_429_after_repeated_failures():
+    for _ in range(5):
+        response = client.post("/api/v1/auth/login", json={"email": "rate-limit@example.com", "password": "WrongPass1"})
+        assert response.status_code == 401
+    limited = client.post("/api/v1/auth/login", json={"email": "rate-limit@example.com", "password": "WrongPass1"})
+    assert limited.status_code == 429
