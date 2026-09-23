@@ -20,41 +20,23 @@ export class ApiException extends Error implements ApiError {
   }
 }
 
-// In-memory token storage (with localStorage backup for page refreshes)
-const ACCESS_TOKEN_KEY = 'secure_ai_access_token';
-const REFRESH_TOKEN_KEY = 'secure_ai_refresh_token';
+let accessToken: string | null = null;
+let refreshPromise: Promise<string | null> | null = null;
 
-export function getStoredTokens() {
-  return {
-    accessToken: localStorage.getItem(ACCESS_TOKEN_KEY),
-    refreshToken: localStorage.getItem(REFRESH_TOKEN_KEY),
-  };
+export function getAccessToken() {
+  return accessToken;
 }
 
-export function setStoredTokens(accessToken: string, refreshToken: string) {
-  localStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
-  localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
+export function setAccessToken(token: string) {
+  accessToken = token;
 }
 
-export function clearStoredTokens() {
-  localStorage.removeItem(ACCESS_TOKEN_KEY);
-  localStorage.removeItem(REFRESH_TOKEN_KEY);
-}
-
-let isRefreshing = false;
-let refreshSubscribers: ((token: string) => void)[] = [];
-
-function subscribeTokenRefresh(callback: (token: string) => void) {
-  refreshSubscribers.push(callback);
-}
-
-function onRefreshed(token: string) {
-  refreshSubscribers.forEach((cb) => cb(token));
-  refreshSubscribers = [];
+export function clearAccessToken() {
+  accessToken = null;
 }
 
 export const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
-export const USE_MOCK_API = import.meta.env.VITE_USE_MOCK_API !== 'false';
+export const USE_MOCK_API = import.meta.env.VITE_USE_MOCK_API === 'true';
 
 let onUnauthorizedCallback: (() => void) | null = null;
 
@@ -67,9 +49,9 @@ export function registerUnauthorizedHandler(callback: () => void) {
  */
 export async function apiClient<T>(
   endpoint: string,
-  options: RequestInit = {}
+  options: RequestInit = {},
+  retryOnUnauthorized = true
 ): Promise<T> {
-  const { accessToken, refreshToken } = getStoredTokens();
   const headers = new Headers(options.headers || {});
 
   if (!headers.has('Content-Type') && !(options.body instanceof FormData)) {
@@ -84,75 +66,25 @@ export async function apiClient<T>(
 
   let response: Response;
   try {
-    response = await fetch(url, { ...options, headers });
+    response = await fetch(url, { ...options, headers, credentials: 'include' });
   } catch {
     throw new ApiException('Network failure: Unable to reach backend server', 0);
   }
 
   // Handle Token Expiry & Automatic Refresh (401)
-  if (response.status === 401 && refreshToken && !endpoint.includes('/auth/login') && !endpoint.includes('/auth/refresh')) {
-    if (!isRefreshing) {
-      isRefreshing = true;
+  const isAuthEndpoint = endpoint.includes('/api/v1/auth/login') || endpoint.includes('/api/v1/auth/refresh');
+  if (response.status === 401 && retryOnUnauthorized && !isAuthEndpoint) {
+    refreshPromise ??= refreshAccessToken();
+    const newAccessToken = await refreshPromise;
+    refreshPromise = null;
 
-      try {
-        const refreshResponse = await fetch(`${BASE_URL}/auth/refresh`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refresh_token: refreshToken }),
-        });
-
-        if (refreshResponse.ok) {
-          const data = await refreshResponse.json();
-          const newAccessToken = data.access_token || data.accessToken;
-          const newRefreshToken = data.refresh_token || data.refreshToken || refreshToken;
-
-          setStoredTokens(newAccessToken, newRefreshToken);
-          onRefreshed(newAccessToken);
-          isRefreshing = false;
-
-          // Retry initial request with new access token
-          headers.set('Authorization', `Bearer ${newAccessToken}`);
-          const retriedResponse = await fetch(url, { ...options, headers });
-          if (!retriedResponse.ok) {
-            const errData = await retriedResponse.json().catch(() => ({}));
-            throw new ApiException(
-              errData.detail || errData.message || 'Request failed after refresh',
-              retriedResponse.status
-            );
-          }
-          return (await retriedResponse.json()) as T;
-        } else {
-          // Refresh failed
-          clearStoredTokens();
-          isRefreshing = false;
-          if (onUnauthorizedCallback) onUnauthorizedCallback();
-          throw new ApiException('Session expired. Please log in again.', 401);
-        }
-      } catch (err) {
-        clearStoredTokens();
-        isRefreshing = false;
-        if (onUnauthorizedCallback) onUnauthorizedCallback();
-        throw err;
-      }
-    } else {
-      // Another request is already refreshing; queue this request
-      return new Promise<T>((resolve, reject) => {
-        subscribeTokenRefresh(async (newToken: string) => {
-          try {
-            headers.set('Authorization', `Bearer ${newToken}`);
-            const retried = await fetch(url, { ...options, headers });
-            if (!retried.ok) {
-              const err = await retried.json().catch(() => ({}));
-              reject(new ApiException(err.detail || 'Request failed', retried.status));
-            } else {
-              resolve((await retried.json()) as T);
-            }
-          } catch (e) {
-            reject(e);
-          }
-        });
-      });
+    if (newAccessToken) {
+      return apiClient<T>(endpoint, options, false);
     }
+
+    clearAccessToken();
+    onUnauthorizedCallback?.();
+    throw new ApiException('Session expired. Please log in again.', 401);
   }
 
   // Handle other error status codes
@@ -178,4 +110,21 @@ export async function apiClient<T>(
   }
 
   return (await response.json()) as T;
+}
+
+async function refreshAccessToken(): Promise<string | null> {
+  try {
+    const response = await fetch(`${BASE_URL}/api/v1/auth/refresh`, {
+      method: 'POST',
+      credentials: 'include',
+    });
+    if (!response.ok) return null;
+
+    const data = (await response.json()) as { access_token?: string };
+    if (!data.access_token) return null;
+    setAccessToken(data.access_token);
+    return data.access_token;
+  } catch {
+    return null;
+  }
 }

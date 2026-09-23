@@ -12,29 +12,16 @@ export const LoginPage: React.FC = () => {
   const { success, error: notifyError } = useNotification();
   const navigate = useNavigate();
 
-  const [email, setEmail] = useState('admin@enterprise.ai');
-  const [password, setPassword] = useState('••••••••••••');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
 
-  const handleRoleLogin = async (role: UserRole) => {
+  const handleRoleLogin = (role: UserRole) => {
     const testEmail = `${role.toLowerCase()}@enterprise.ai`;
     setEmail(testEmail);
-    setPassword('password');
+    setPassword('');
     setErrorMessage('');
-    setIsLoading(true);
-
-    try {
-      await login({ email: testEmail, password: 'password' });
-      success(`Logged in as ${role}`, `Session established with ${role} permissions.`);
-      navigate(role === 'Admin' ? '/admin/overview' : '/app/chat');
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Login failed';
-      setErrorMessage(msg);
-      notifyError('Authentication Failed', msg);
-    } finally {
-      setIsLoading(false);
-    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {

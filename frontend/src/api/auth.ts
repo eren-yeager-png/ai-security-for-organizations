@@ -1,103 +1,79 @@
-import { apiClient, USE_MOCK_API, setStoredTokens, clearStoredTokens, getStoredTokens } from './client';
-import { AuthResponse, LoginRequest, ForgotPasswordRequest, ResetPasswordRequest, User } from './types';
-import { mockLogin, mockRefreshToken, MOCK_USERS } from '../mocks/auth.mock';
+import { apiClient, clearAccessToken, getAccessToken, setAccessToken } from './client';
+import { ForgotPasswordRequest, LoginRequest, ResetPasswordRequest, User } from './types';
 
-export async function login(req: LoginRequest): Promise<AuthResponse> {
-  if (USE_MOCK_API) {
-    const res = await mockLogin(req);
-    setStoredTokens(res.tokens.accessToken, res.tokens.refreshToken);
-    return res;
-  }
+interface BackendUser {
+  id: number;
+  email: string;
+  role: 'admin' | 'manager' | 'employee';
+  is_active: boolean;
+  created_at: string;
+  last_login_at: string | null;
+}
 
-  // Live FastAPI contract
-  const formData = new URLSearchParams();
-  formData.append('username', req.email);
-  formData.append('password', req.password);
+interface BackendTokenResponse {
+  access_token: string;
+  token_type: string;
+}
 
-  const res = await apiClient<{
-    access_token: string;
-    refresh_token: string;
-    token_type: string;
-    user: User;
-  }>('/auth/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: formData.toString(),
-  });
-
-  const authResponse: AuthResponse = {
-    user: res.user,
-    tokens: {
-      accessToken: res.access_token,
-      refreshToken: res.refresh_token,
-      tokenType: res.token_type || 'Bearer',
-      expiresIn: 3600,
-    },
+function mapUser(user: BackendUser): User {
+  const role = (user.role[0].toUpperCase() + user.role.slice(1)) as User['role'];
+  return {
+    id: String(user.id),
+    email: user.email,
+    name: user.email,
+    role,
+    department: '',
+    isActive: user.is_active,
+    isAdmin: user.role === 'admin',
+    createdAt: user.created_at,
+    lastLogin: user.last_login_at ?? undefined,
   };
+}
 
-  setStoredTokens(authResponse.tokens.accessToken, authResponse.tokens.refreshToken);
-  return authResponse;
+export async function login(req: LoginRequest): Promise<BackendTokenResponse> {
+  const res = await apiClient<BackendTokenResponse>('/api/v1/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: req.email, password: req.password }),
+  }, false);
+  setAccessToken(res.access_token);
+  return res;
 }
 
 export async function getCurrentUser(): Promise<User | null> {
-  const { accessToken } = getStoredTokens();
-  if (!accessToken) return null;
-
-  if (USE_MOCK_API) {
-    if (accessToken.includes('admin')) return MOCK_USERS.admin;
-    if (accessToken.includes('manager')) return MOCK_USERS.manager;
-    return MOCK_USERS.employee;
-  }
-
-  return apiClient<User>('/users/me');
+  if (!getAccessToken()) return null;
+  const user = await apiClient<BackendUser>('/api/v1/auth/me');
+  return mapUser(user);
 }
 
 export async function refreshSession(): Promise<string> {
-  const { refreshToken } = getStoredTokens();
-  if (!refreshToken) throw new Error('No refresh token available');
-
-  if (USE_MOCK_API) {
-    const res = await mockRefreshToken(refreshToken);
-    setStoredTokens(res.accessToken, res.refreshToken);
-    return res.accessToken;
-  }
-
-  const res = await apiClient<{ access_token: string; refresh_token?: string }>('/auth/refresh', {
+  const res = await apiClient<BackendTokenResponse>('/api/v1/auth/refresh', {
     method: 'POST',
-    body: JSON.stringify({ refresh_token: refreshToken }),
-  });
-
-  setStoredTokens(res.access_token, res.refresh_token || refreshToken);
+  }, false);
+  setAccessToken(res.access_token);
   return res.access_token;
 }
 
 export async function logout(): Promise<void> {
-  if (!USE_MOCK_API) {
-    await apiClient('/auth/logout', { method: 'POST' }).catch(() => {});
+  try {
+    await apiClient('/api/v1/auth/logout', { method: 'POST' }, false);
+  } finally {
+    clearAccessToken();
   }
-  clearStoredTokens();
 }
 
 export async function forgotPassword(req: ForgotPasswordRequest): Promise<{ message: string }> {
-  if (USE_MOCK_API) {
-    await new Promise((r) => setTimeout(r, 400));
-    return { message: `Password reset link has been dispatched to ${req.email}` };
-  }
-
-  return apiClient<{ message: string }>('/auth/forgot-password', {
+  const response = await apiClient<{ detail?: string; message?: string }>('/api/v1/auth/forgot-password', {
     method: 'POST',
     body: JSON.stringify(req),
-  });
+  }, false);
+  return { message: response.message ?? response.detail ?? 'If the account exists, reset instructions have been sent' };
 }
 
 export async function resetPassword(req: ResetPasswordRequest): Promise<{ message: string }> {
-  if (USE_MOCK_API) {
-    await new Promise((r) => setTimeout(r, 400));
-    return { message: 'Password has been updated successfully.' };
-  }
-
-  return apiClient<{ message: string }>('/auth/reset-password', {
+  const response = await apiClient<{ detail?: string; message?: string }>('/api/v1/auth/reset-password', {
     method: 'POST',
-    body: JSON.stringify(req),
-  });
+    body: JSON.stringify({ token: req.token, password: req.newPassword }),
+  }, false);
+  return { message: response.message ?? response.detail ?? 'Password has been updated successfully.' };
 }
