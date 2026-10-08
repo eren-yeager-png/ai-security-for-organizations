@@ -1,7 +1,5 @@
 import logging
 import secrets
-import threading
-import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -9,7 +7,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import AUTH_COOKIE_NAME, COOKIE_SAMESITE, COOKIE_SECURE, ENVIRONMENT, REFRESH_TOKEN_EXPIRE_DAYS
-from app.audit import record_auth_event
+from app.audit import audit_event, record_auth_event
+from app.rate_limit import SlidingWindowLimiter
 from app.db.database import get_db
 from app.db.models import PasswordResetToken, RefreshToken, Role, User
 from app.deps import get_current_user
@@ -20,8 +19,8 @@ router = APIRouter(prefix="/api/v1/auth", tags=["authentication"])
 logger = logging.getLogger(__name__)
 LOGIN_FAILURE_LIMIT = 5
 LOGIN_FAILURE_WINDOW_SECONDS = 60
-_login_failures: dict[str, list[float]] = {}
-_login_failure_lock = threading.Lock()
+# Bounded in-memory limiter (idle keys are pruned, so random emails cannot grow memory forever).
+_login_limiter = SlidingWindowLimiter(LOGIN_FAILURE_LIMIT, LOGIN_FAILURE_WINDOW_SECONDS)
 
 
 def utc_now() -> datetime:
@@ -44,39 +43,34 @@ def _login_key(request: Request, email: str) -> str:
 
 
 def _check_login_limit(key: str) -> bool:
-    now = time.monotonic()
-    with _login_failure_lock:
-        failures = [stamp for stamp in _login_failures.get(key, []) if now - stamp < LOGIN_FAILURE_WINDOW_SECONDS]
-        _login_failures[key] = failures
-        return len(failures) < LOGIN_FAILURE_LIMIT
+    return not _login_limiter.is_limited(key)
 
 
 def _record_login_failure(key: str) -> None:
-    with _login_failure_lock:
-        _login_failures.setdefault(key, []).append(time.monotonic())
+    _login_limiter.record(key)
 
 
 def _clear_login_failures(key: str) -> None:
-    with _login_failure_lock:
-        _login_failures.pop(key, None)
+    _login_limiter.reset(key)
 
 
 @router.post("/login", response_model=TokenResponse)
 def login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     failure_key = _login_key(request, str(payload.email))
     if not _check_login_limit(failure_key):
+        audit_event("LOGIN_RATE_LIMITED", result="DENIED")
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many login attempts", headers={"Retry-After": str(LOGIN_FAILURE_WINDOW_SECONDS)})
     user = db.scalar(select(User).where(User.email == normalize_email(str(payload.email))))
     if user is None or not user.is_active or not verify_password(payload.password, user.password_hash):
         _record_login_failure(failure_key)
-        record_auth_event(db, "LOGIN_FAILURE", user.id if user else None, success=False)
+        record_auth_event(db, "LOGIN_FAILURE", user.id if user else None, success=False, role=user.role.name if user else None)
         db.commit()
         logger.warning("authentication_failed")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
     _clear_login_failures(failure_key)
     user.last_login_at = utc_now()
     issue_refresh_token(db, user, response)
-    record_auth_event(db, "LOGIN_SUCCESS", user.id)
+    record_auth_event(db, "LOGIN_SUCCESS", user.id, role=user.role.name)
     db.commit()
     logger.info("authentication_succeeded user_id=%s", user.id)
     return TokenResponse(access_token=create_access_token(user.id, user.role.name))
@@ -105,7 +99,7 @@ def refresh(request: Request, response: Response, db: Session = Depends(get_db))
     db.flush()
     stored.replaced_by_id = replacement.id
     set_refresh_cookie(response, new_raw)
-    record_auth_event(db, "TOKEN_REFRESH", user.id)
+    record_auth_event(db, "TOKEN_REFRESH", user.id, role=user.role.name)
     db.commit()
     logger.info("token_refreshed user_id=%s", user.id)
     return TokenResponse(access_token=create_access_token(user.id, user.role.name))

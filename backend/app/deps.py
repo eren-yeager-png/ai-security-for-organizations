@@ -3,6 +3,7 @@ from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
+from app.audit import audit_event
 from app.db.database import get_db
 from app.db.models import User
 from app.security import decode_access_token
@@ -19,10 +20,12 @@ def get_current_user(
     try:
         payload = decode_access_token(credentials.credentials)
         user_id = int(payload["sub"])
-    except (ValueError, KeyError, jwt.InvalidTokenError):
+    except (ValueError, KeyError, jwt.InvalidTokenError) as exc:
+        audit_event("AUTH_TOKEN_REJECTED", result="DENIED", detail={"reason": type(exc).__name__})
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
     user = db.get(User, user_id)
     if user is None or not user.is_active:
+        audit_event("AUTH_INACTIVE_OR_UNKNOWN_USER", result="DENIED", user_id=user.id if user else None)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
     return user
 
@@ -30,6 +33,7 @@ def get_current_user(
 def require_roles(*roles: str):
     def dependency(user: User = Depends(get_current_user)) -> User:
         if user.role.name not in roles:
+            audit_event("ROLE_ACCESS_DENIED", user, result="DENIED", detail={"required_roles": sorted(roles)})
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
         return user
 

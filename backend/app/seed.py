@@ -1,10 +1,14 @@
 import os
+from pathlib import Path
 
+from dotenv import load_dotenv
 from sqlalchemy import select
 
 from app.db.database import SessionLocal
 from app.db.models import Role, User
 from app.security import hash_password, normalize_email, validate_password
+
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env")
 
 
 def seed_admin() -> None:

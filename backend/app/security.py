@@ -34,7 +34,9 @@ def create_access_token(user_id: int, role: str) -> str:
 
 
 def decode_access_token(token: str) -> dict:
-    payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+    # Algorithm is pinned (no "none"/alg confusion) and these claims are mandatory:
+    # a token without an expiry is rejected even if its signature is valid.
+    payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM], options={"require": ["exp", "iat", "sub", "jti"]})
     if payload.get("type") != "access" or not payload.get("sub") or not payload.get("jti"):
         raise jwt.InvalidTokenError("Invalid access token")
     return payload
